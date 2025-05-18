@@ -1,11 +1,15 @@
-import React, { useEffect, useRef, useState, useMemo, useCallback } from "react";
-import _ from 'lodash';
+import React, { useEffect, useRef, useState, useCallback } from "react";
+import {
+  // parseDxfEntities, // Removed: Preview now uses Maker.js model
+  createPreviewScene,
+  parseDxfToMakerJs, // For accurate calculations and preview
+  calculateDimensionsFromMakerJsModel, // For accurate calculations
+} from "@/lib/dxf-preview";
+import DxfParser from "dxf-parser";
+import { Loader2 } from "lucide-react";
 import * as THREE from "three";
-import { Canvas, useLoader, useFrame } from '@react-three/fiber'
-import { DXFLoader } from 'three-dxf-loader'
-import { OrbitControls, Bounds, Center } from "@react-three/drei";
-
 import { getPricing } from "@/lib/api";
+import _ from 'lodash';
 
 // Define a default pricing structure to prevent errors before data is loaded
 const defaultPricing = {
@@ -13,47 +17,6 @@ const defaultPricing = {
   finishes: {},
   services: {},
 };
-
-// This little component loads & renders the DXF as a THREE.Group
-function DxfScene({ url, onDimensionsCalculated }) {
-  // load the DXF file as a Three.js group
-  const { entity } = useLoader(
-    DXFLoader,
-    url,
-    loader => {
-      loader.setEnableLayer(true);
-      loader.setConsumeUnits(true);
-      loader.setDefaultColor(0x888888);
-    }
-  );
-
-  // once `entity` is ready, compute its bounding box & fire callback
-  const box = useMemo(() => {
-    if (!entity) return null;
-    const b = new THREE.Box3().setFromObject(entity);
-    const size = b.getSize(new THREE.Vector3());
-    onDimensionsCalculated?.({
-      width:  Number(size.x.toFixed(3)),
-      height: Number(size.y.toFixed(3)),
-    });
-    return b;
-  }, [entity, onDimensionsCalculated]);
-
-  //  optional: spin it so you can see it’s truly 3D
-  // useFrame(() => {
-  //   if (entity) entity.rotation.z += 0.001;
-  // });
-
-  // center the group at origin
-  if (!entity || !box) return null;
-  const center = box.getCenter(new THREE.Vector3());
-  return (
-    <primitive
-      object={entity}
-      position={[-center.x, -center.y, 0]}
-    />
-  );
-}
 
 const DxfPreview = ({
  file,
@@ -64,9 +27,13 @@ const DxfPreview = ({
  selectedFinish, // Changed from selectedFinishes (array) to selectedFinish (string/null)
  selectedServices, // New prop for selected services (array)
 }) => {
- 
-  const [url, setUrl] = useState(null);
-  const [error, setError]     = useState(null);
+ const canvasRef = useRef(null);
+  const containerRef = useRef(null);
+  const rendererRef = useRef(null);
+  const sceneRef = useRef(null);
+  const cameraRef = useRef(null);
+  const animationFrameRef = useRef(null);
+
   const [pricingConfig, setPricingConfig] = useState(defaultPricing);
   const [dimensions, setDimensions] = useState(null); // Store calculated dimensions
 
@@ -87,27 +54,133 @@ const DxfPreview = ({
   }, []); // Empty dependency array means this runs only once on mount
 
   // Effect to initialize DXF preview and calculate dimensions
- // 1️⃣ Turn File → Object URL
- useEffect(() => {
-  if (!file) {
-    setUrl(null);
-    return;
-  }
-  const objectUrl = URL.createObjectURL(file);
-  setUrl(objectUrl);
-  return () => {
-    URL.revokeObjectURL(objectUrl);
-    setUrl(null);
-  };
-}, [file]);
+  useEffect(() => {
+    let cleanup = () => {};
 
-if (!file) {
-  return (
-    <div className="w-full aspect-square bg-gray-100 flex items-center justify-center">
-      Please upload a DXF to preview.
-    </div>
-  );
-}
+    const initPreview = async () => {
+      if (!file || !canvasRef.current || !containerRef.current) return;
+
+      try {
+        console.log('Starting DXF preview initialization');
+        
+        // Parse DXF file
+        const parser = new DxfParser();
+        const text = await file.text();
+        console.log('DXF file content:', text.substring(0, 200) + '...');
+        
+        const dxf = parser.parseSync(text);
+        console.log('Parsed DXF:', dxf);
+        
+        // --- Accurate Dimension Calculation using Maker.js ---
+        console.log('Parsing DXF for Maker.js model...');
+        const makerJsModel = parseDxfToMakerJs(dxf);
+        console.log('Maker.js model:', makerJsModel);
+
+        if (!makerJsModel || !makerJsModel.paths || Object.keys(makerJsModel.paths).length === 0) {
+          throw new Error('Failed to create a valid Maker.js model from the DXF file.');
+        }
+
+        console.log('Calculating dimensions from Maker.js model...');
+        // No longer passing units, calculation logic handles it heuristically
+        const accurateDimensions = calculateDimensionsFromMakerJsModel(makerJsModel);
+        console.log('Accurate dimensions calculated (inches):', accurateDimensions);
+
+        // Store accurate dimensions in state for pricing
+        setDimensions(accurateDimensions);
+
+        // --- Visual Preview Setup using Maker.js model ---
+        // Note: createPreviewScene now directly uses the makerJsModel
+        // No need to parse separately for preview anymore.
+
+        // Pass bounding box dimensions (width/height) to parent for display
+        if (onDimensionsCalculated) {
+          onDimensionsCalculated({
+            width: accurateDimensions.width.toFixed(3), // Use width from Maker.js extents
+            height: accurateDimensions.height.toFixed(3), // Use height from Maker.js extents
+          });
+        }
+
+        // Create preview using the Maker.js model
+        console.log('Creating THREE.js preview scene from Maker.js model...');
+        const { scene, camera, renderer } = createPreviewScene(makerJsModel, containerRef.current);
+        console.log('THREE.js scene created:', scene, camera, renderer);
+        console.log('Preview scene created');
+        
+        // Store refs
+        sceneRef.current = scene;
+        cameraRef.current = camera;
+        rendererRef.current = renderer;
+        
+        // Clear existing content
+        while (canvasRef.current.firstChild) {
+          canvasRef.current.removeChild(canvasRef.current.firstChild);
+        }
+        
+        // Append new renderer
+        canvasRef.current.appendChild(renderer.domElement);
+        console.log('Renderer appended to canvas');
+
+        // Initial render
+        renderer.render(scene, camera);
+
+        // Animation loop
+        const animate = () => {
+          if (renderer && scene && camera) {
+            renderer.render(scene, camera);
+          }
+          animationFrameRef.current = requestAnimationFrame(animate);
+        };
+        animate();
+
+        // Handle resize
+        const handleResize = () => {
+          if (!containerRef.current || !renderer || !camera || !scene) return;
+          const width = containerRef.current.clientWidth;
+          const height = width; // Keep aspect ratio 1:1
+          renderer.setSize(width, height);
+          renderer.render(scene, camera);
+        };
+
+        window.addEventListener('resize', handleResize);
+        handleResize(); // Initial resize
+        
+        cleanup = () => {
+          console.log('Cleaning up preview');
+          window.removeEventListener('resize', handleResize);
+          if (animationFrameRef.current) {
+            cancelAnimationFrame(animationFrameRef.current);
+          }
+          if (renderer) {
+            renderer.dispose();
+          }
+          if (scene) {
+            scene.traverse((object) => {
+              if (object.geometry) {
+                object.geometry.dispose();
+              }
+              if (object.material) {
+                if (Array.isArray(object.material)) {
+                  object.material.forEach(material => material.dispose());
+                } else {
+                  object.material.dispose();
+                }
+              }
+            });
+          }
+        };
+      } catch (error) {
+        console.error('Error creating preview:', error);
+        throw error;
+      }
+    };
+
+    initPreview().catch(error => {
+      console.error('Preview initialization failed:', error);
+    });
+
+    return () => cleanup();
+  }, [file, onDimensionsCalculated]); // Re-run if file or onDimensionsCalculated changes
+
   // Effect to calculate price when pricing config, dimensions, or selections change
   useEffect(() => {
     const calculatePrice = () => {
@@ -243,33 +316,15 @@ console.log("--- Final Calculated Price ---:", totalPrice.toFixed(2));
    calculatePrice();
  }, [pricingConfig, dimensions, selectedMaterial, selectedThickness, selectedFinish, selectedServices, onPriceCalculated]); // Update dependency array
 
- 
-  // Remount canvas on file change to clear previous scene
-  const canvasKey = file.name + '_' + (file.lastModified || 0);
-
  return (
-  <div className="w-full aspect-square bg-white">
-      <Canvas
-        key={canvasKey}
-        orthographic
-        camera={{ position: [10, 10, 10], zoom: 50, near: 0.1, far: 1000 }}
-      >
-        {/* lights */}
-        <ambientLight intensity={0.3} />
-        <directionalLight position={[10, 10, 10]} intensity={0.8} />
-
-        <Bounds fit clip margin={1}>
-          <Center>
-            <DxfScene
-              url={url}
-              onDimensionsCalculated={onDimensionsCalculated}
-            />
-          </Center>
-        </Bounds>
-
-        {/* orbit controls if you like */}
-        <OrbitControls />
-      </Canvas>
+    <div ref={containerRef} className="w-full">
+      <div ref={canvasRef} className="w-full aspect-square bg-white relative">
+        {!file && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+          </div>
+        )}
+      </div>
     </div>
   );
 };
