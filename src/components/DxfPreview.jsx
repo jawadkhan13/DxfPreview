@@ -16,44 +16,36 @@ const defaultPricing = {
 
 // This little component loads & renders the DXF as a THREE.Group
 function DxfScene({ url, onDimensionsCalculated }) {
-  // load the DXF file as a Three.js group
-  const { entity } = useLoader(
-    DXFLoader,
-    url,
-    loader => {
-      loader.setEnableLayer(true);
-      loader.setConsumeUnits(true);
-      loader.setDefaultColor(0x888888);
-    }
-  );
+  const { entity } = useLoader(DXFLoader, url, loader => {
+    loader.setEnableLayer(true);
+    loader.setConsumeUnits(true);
+    loader.setDefaultColor(0x888888);
+  });
 
-  // once `entity` is ready, compute its bounding box & fire callback
-  const box = useMemo(() => {
-    if (!entity) return null;
-    const b = new THREE.Box3().setFromObject(entity);
-    const size = b.getSize(new THREE.Vector3());
-    onDimensionsCalculated?.({
-      width:  Number(size.x.toFixed(3)),
-      height: Number(size.y.toFixed(3)),
+  useEffect(() => {
+    if (!entity) return;
+    const box = new THREE.Box3().setFromObject(entity);
+    const size = box.getSize(new THREE.Vector3());
+    const w = size.x, h = size.y;
+    const area = w * h;
+    let totalEdgeLength = 0;
+    entity.traverse(obj => {
+      if (obj.isLineSegments) {
+        const pos = obj.geometry.attributes.position.array;
+        for (let i = 0; i < pos.length; i += 6) {
+          const dx = pos[i+3] - pos[i], dy = pos[i+4] - pos[i+1];
+          totalEdgeLength += Math.hypot(dx, dy);
+        }
+      }
     });
-    return b;
+    const holeCount = 0; // or implement circle detection here
+    onDimensionsCalculated({ width: w, height: h, area, totalEdgeLength, holeCount });
   }, [entity, onDimensionsCalculated]);
 
-  //  optional: spin it so you can see it’s truly 3D
-  // useFrame(() => {
-  //   if (entity) entity.rotation.z += 0.001;
-  // });
-
-  // center the group at origin
-  if (!entity || !box) return null;
-  const center = box.getCenter(new THREE.Vector3());
-  return (
-    <primitive
-      object={entity}
-      position={[-center.x, -center.y, 0]}
-    />
-  );
+  return entity ? <primitive object={entity} /> : null;
 }
+
+
 
 const DxfPreview = ({
  file,
@@ -69,6 +61,20 @@ const DxfPreview = ({
   const [error, setError]     = useState(null);
   const [pricingConfig, setPricingConfig] = useState(defaultPricing);
   const [dimensions, setDimensions] = useState(null); // Store calculated dimensions
+
+  // Turn File → Object URL
+ useEffect(() => {
+  if (!file) {
+    setUrl(null);
+    return;
+  }
+  const objectUrl = URL.createObjectURL(file);
+  setUrl(objectUrl);
+  return () => {
+    URL.revokeObjectURL(objectUrl);
+    setUrl(null);
+  };
+}, [file]);
 
   // Fetch pricing data on component mount
   useEffect(() => {
@@ -86,20 +92,59 @@ const DxfPreview = ({
     fetchPricing();
   }, []); // Empty dependency array means this runs only once on mount
 
-  // Effect to initialize DXF preview and calculate dimensions
- // 1️⃣ Turn File → Object URL
+ // 3) Re-run pricing whenever any input changes
  useEffect(() => {
-  if (!file) {
-    setUrl(null);
+  if (
+    !pricingConfig ||
+    !dimensions ||
+    !selectedMaterial ||
+    !selectedThickness
+  ) {
+    onPriceCalculated?.(0);
     return;
   }
-  const objectUrl = URL.createObjectURL(file);
-  setUrl(objectUrl);
-  return () => {
-    URL.revokeObjectURL(objectUrl);
-    setUrl(null);
-  };
-}, [file]);
+
+  let total = 0;
+  const { area, holeCount, totalEdgeLength } = dimensions;
+
+  // Material
+  const mKey = selectedMaterial.replace(/ /g,'_');
+  const tKey = selectedThickness.replace(/\./g,'_').replace(/"/g,'');
+  const matP = Number(pricingConfig.materials?.[mKey]?.[tKey] || 0);
+  total += area * matP;
+
+  // Finish
+  if (selectedFinish) {
+    const fKey = selectedFinish.replace(/ /g,'_').toLowerCase() + '_per_sq_inch';
+    const finP = Number(pricingConfig.finishes?.[fKey] || 0);
+    total += area * finP;
+  }
+
+  // Services
+  (selectedServices || []).forEach(s => {
+    let qty = 0, svcKey = '';
+    if (s === 'Countersinking') {
+      qty = holeCount;
+      svcKey = 'countersinking_per_hole';
+    } else if (s === 'Deburring') {
+      qty = totalEdgeLength;
+      svcKey = 'deburring_per_inch';
+    }
+    const svcP = Number(pricingConfig.services?.[svcKey] || 0);
+    total += qty * svcP;
+  });
+
+  onPriceCalculated?.(Number(total.toFixed(2)));
+}, [
+  pricingConfig,
+  dimensions,
+  selectedMaterial,
+  selectedThickness,
+  selectedFinish,
+  selectedServices,
+  onPriceCalculated
+]);
+
 
 if (!file) {
   return (
@@ -262,7 +307,12 @@ console.log("--- Final Calculated Price ---:", totalPrice.toFixed(2));
           <Center>
             <DxfScene
               url={url}
-              onDimensionsCalculated={onDimensionsCalculated}
+              onDimensionsCalculated={dims => {
+                // update local state…
+                setDimensions(dims);
+                // and propagate to parent
+                onDimensionsCalculated?.(dims);
+              }}
             />
           </Center>
         </Bounds>
