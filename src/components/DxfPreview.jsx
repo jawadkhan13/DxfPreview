@@ -21,13 +21,14 @@ function DxfScene({ url, onDimensionsCalculated }) {
     loader.setConsumeUnits(true);
     loader.setDefaultColor(0x888888);
   });
-
+  // console.log("Entity:", entity);
   useEffect(() => {
     if (!entity) return;
     const box = new THREE.Box3().setFromObject(entity);
     const size = box.getSize(new THREE.Vector3());
-    const w = size.x, h = size.y;
-    const area = w * h;
+    const widthIn  = size.x * 39.3701
+    const heightIn = size.y * 39.3701
+    const area = widthIn * heightIn;
     let totalEdgeLength = 0;
     entity.traverse(obj => {
       if (obj.isLineSegments) {
@@ -38,8 +39,9 @@ function DxfScene({ url, onDimensionsCalculated }) {
         }
       }
     });
-    const holeCount = 0; // or implement circle detection here
-    onDimensionsCalculated({ width: w, height: h, area, totalEdgeLength, holeCount });
+    const holeCount = 0; 
+    onDimensionsCalculated({ width: Number(widthIn.toFixed(3)), height: Number(heightIn.toFixed(3)), area, totalEdgeLength, holeCount });
+    console.log("Dimensions calculated:", { width: Number(widthIn.toFixed(3)), height: Number(heightIn.toFixed(3)), totalEdgeLength, holeCount });
   }, [entity, onDimensionsCalculated]);
 
   return entity ? <primitive object={entity} /> : null;
@@ -70,6 +72,7 @@ const DxfPreview = ({
   }
   const objectUrl = URL.createObjectURL(file);
   setUrl(objectUrl);
+  console.log("Object URL created:", objectUrl);
   return () => {
     URL.revokeObjectURL(objectUrl);
     setUrl(null);
@@ -310,14 +313,13 @@ console.log("--- Final Calculated Price ---:", totalPrice.toFixed(2));
               onDimensionsCalculated={dims => {
                 // update local state…
                 setDimensions(dims);
-                // and propagate to parent
+                // propagate to parent
                 onDimensionsCalculated?.(dims);
               }}
             />
           </Center>
         </Bounds>
 
-        {/* orbit controls if you like */}
         <OrbitControls />
       </Canvas>
     </div>
